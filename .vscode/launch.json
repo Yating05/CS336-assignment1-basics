@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+
+
+        {
+            "justMyCode": false,
+            "name": "uv+pytest",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "python": "${command:python.interpreterPath}",  
+            "console": "integratedTerminal",
+            // "args": ["-k", "test_multihead_self_attention"],
+            "args": ["tests/test_train_bpe.py"],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
