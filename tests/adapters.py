@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
+from collections.abc import Iterable
+from jaxtyping import Float, Int
 
 import numpy.typing as npt
 import torch
-from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 
@@ -28,8 +28,22 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
+    # Import the Linear class from cs336_basics
+    from cs336_basics import Linear
+    
+    # Create a Linear module with the given dimensions
+    linear_module = Linear(in_features=d_in, out_features=d_out)
+    
+    # Load the provided weights into the module
+    # The weights tensor has shape (d_out, d_in) which matches our W parameter
+    state_dict = {"W": weights}
+    linear_module.load_state_dict(state_dict)
+    
+    # Apply the linear transformation
+    with torch.no_grad():
+        output = linear_module(in_features)
+    
+    return output
 
 
 def run_embedding(
@@ -50,8 +64,22 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
+    # Import the Embedding class from cs336_basics
+    from cs336_basics import Embedding
+    
+    # Create an Embedding module with the given dimensions
+    embedding_module = Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+    
+    # Load the provided weights into the module
+    # The weights tensor has shape (vocab_size, d_model) which matches our weight parameter
+    state_dict = {"weight": weights}
+    embedding_module.load_state_dict(state_dict)
+    
+    # Apply the embedding lookup
+    with torch.no_grad():
+        output = embedding_module(token_ids)
+    
+    return output
 
 
 def run_swiglu(
@@ -76,35 +104,51 @@ def run_swiglu(
     Returns:
         Float[Tensor, "... d_model"]: Output embeddings of the same shape as the input embeddings.
     """
-    # Example:
-    # If your state dict keys match, you can use `load_state_dict()`
-    # swiglu.load_state_dict(weights)
-    # You can also manually assign the weights
-    # swiglu.w1.weight.data = w1_weight
-    # swiglu.w2.weight.data = w2_weight
-    # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    # Create SwiGLU module
+    from cs336_basics import SwiGLU
+    
+    swiglu = SwiGLU(d_model=d_model)
+    
+    # Manually assign the weights
+    # Note: The Linear layers store weights with shape (out_features, in_features)
+    # but the test provides weights in different orientations
+    swiglu.W1.W.data = w1_weight  # w1_weight is (d_ff, d_model)
+    swiglu.W2.W.data = w2_weight # w2_weight is (d_model, d_ff), need transpose to (d_ff, d_model)
+    swiglu.W3.W.data = w3_weight  # w3_weight is (d_ff, d_model)
+    
+    # Run forward pass
+    return swiglu(in_features)
 
 
 def run_scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
     K: Float[Tensor, " ... keys d_k"],
     V: Float[Tensor, " ... values d_v"],
-    mask: Bool[Tensor, " ... queries keys"] | None = None,
+    mask: Float[Tensor, " ... queries keys"] | None = None,
 ) -> Float[Tensor, " ... queries d_v"]:
     """
     Given key (K), query (Q), and value (V) tensors, return
     the output of your scaled dot product attention implementation.
 
     Args:
-        Q (Float[Tensor, " ... queries d_k"]): Query tensor
-        K (Float[Tensor, " ... keys d_k"]): Key tensor
-        V (Float[Tensor, " ... values d_v"]): Values tensor
-        mask (Bool[Tensor, " ... queries keys"] | None): Mask tensor
+        Q (Float[Tensor, " ... queries d_k"]): Query tensor n x dk
+        K (Float[Tensor, " ... keys d_k"]): Key tensor m x dk
+        V (Float[Tensor, " ... values d_v"]): Values tensor m x dv
+        mask (Float[Tensor, " ... queries keys"] | None): Mask tensor
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    dk = Q.shape[-1]
+    # print("Q shape:", Q.shape, "K shape:", K.shape, "V shape:", V.shape)
+    QK_T = Q @ torch.swapaxes(K, -1, -2)
+    scaled_scores = QK_T / (dk ** 0.5)
+    if mask is not None:
+        scaled_scores = scaled_scores.masked_fill(mask == 0, float('-inf'))
+    attn_weights = torch.softmax(scaled_scores, dim=-1)
+    output = attn_weights @ V
+    return output
+
+    
 
 
 def run_multihead_self_attention(
@@ -138,7 +182,40 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    # Import the MultiHeadSelfAttention class from cs336_basics
+    from cs336_basics import MultiHeadSelfAttention
+    
+    # Create the multi-head self-attention module
+    mha = MultiHeadSelfAttention(d_model=d_model, num_heads=num_heads)
+    
+    # The test provides individual head weights, but our implementation uses batched weights
+    # We need to construct the full weight matrices for Q, K, V projections
+    # Each head has weights of shape (d_k, d_in), and we have num_heads of them
+    d_k = q_proj_weight.shape[0]
+    d_in = q_proj_weight.shape[1]
+    
+    # Stack all head weights to create full projection matrices
+    # For Q, K, V: repeat the same weights for all heads (since test gives same weights per head)
+    # full_q_weight = q_proj_weight.repeat(num_heads, 1)  # (d_model, d_in)
+    # full_k_weight = k_proj_weight.repeat(num_heads, 1)  # (d_model, d_in)
+    # full_v_weight = v_proj_weight.repeat(num_heads, 1)  # (d_model, d_in)
+    
+    # Load the weights into the module
+    # Our Linear layers expect weights of shape (out_features, in_features)
+    state_dict = {
+        "W_q.W": q_proj_weight,
+        "W_k.W": k_proj_weight,
+        "W_v.W": v_proj_weight,
+        "W_o.W": o_proj_weight
+    }
+    # Load state dict with strict=False to be safe (no RoPE in this version)
+    mha.load_state_dict(state_dict, strict=False)
+    
+    # Run forward pass
+    with torch.no_grad():
+        output = mha(in_features)
+    
+    return output
 
 
 def run_multihead_self_attention_with_rope(
@@ -178,7 +255,39 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    # Import the MultiHeadSelfAttention class from cs336_basics
+    from cs336_basics import MultiHeadSelfAttention
+    
+    # Create the multi-head self-attention module with RoPE support
+    mha = MultiHeadSelfAttention(
+        d_model=d_model, 
+        num_heads=num_heads,
+        theta=theta,
+        max_seq_len=max_seq_len
+    )
+    
+    # The test provides individual head weights, but our implementation uses batched weights
+    # We need to construct the full weight matrices for Q, K, V projections
+    # Each head has weights of shape (d_k, d_in), and we have num_heads of them
+    d_k = q_proj_weight.shape[0]
+    d_in = q_proj_weight.shape[1]
+    
+    # Load the weights into the module
+    # Our Linear layers expect weights of shape (out_features, in_features)
+    state_dict = {
+        "W_q.W": q_proj_weight,
+        "W_k.W": k_proj_weight,
+        "W_v.W": v_proj_weight,
+        "W_o.W": o_proj_weight
+    }
+    # Load state dict with strict=False to allow missing RoPE buffers (they'll be initialized automatically)
+    mha.load_state_dict(state_dict, strict=False)
+    
+    # Run forward pass (RoPE is applied automatically inside the forward method)
+    with torch.no_grad():
+        output = mha(in_features)
+    
+    return output
 
 
 def run_rope(
@@ -200,7 +309,22 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    # Import the RotaryPositionalEmbedding class from cs336_basics
+    from cs336_basics import RotaryPositionalEmbedding
+    
+    # Create a RoPE module with the given parameters
+    rope_module = RotaryPositionalEmbedding(
+        theta=theta,
+        d_k=d_k,
+        max_seq_len=max_seq_len,
+        device=in_query_or_key.device
+    )
+    
+    # Apply RoPE to the input tensor
+    with torch.no_grad():
+        output = rope_module(in_query_or_key, token_positions)
+    
+    return output
 
 
 def run_transformer_block(
@@ -273,7 +397,45 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    # Import the TransformerBlock class from cs336_basics
+    from cs336_basics import TransformerBlock
+    
+    # Create the Transformer block with RoPE support
+    transformer_block = TransformerBlock(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        theta=theta,
+        max_seq_len=max_seq_len,
+        device=in_features.device
+    )
+    
+    # Map the test weights to our module's expected state dict format
+    state_dict = {
+        # Attention weights
+        "attention.W_q.W": weights["attn.q_proj.weight"],
+        "attention.W_k.W": weights["attn.k_proj.weight"], 
+        "attention.W_v.W": weights["attn.v_proj.weight"],
+        "attention.W_o.W": weights["attn.output_proj.weight"],
+        
+        # RMSNorm weights
+        "norm1.weight": weights["ln1.weight"],
+        "norm2.weight": weights["ln2.weight"],
+        
+        # Feed-forward weights
+        "feed_forward.W1.W": weights["ffn.w1.weight"],  # Transpose from (d_model, d_ff) to (d_ff, d_model)
+        "feed_forward.W2.W": weights["ffn.w2.weight"],   # Already (d_ff, d_model)
+        "feed_forward.W3.W": weights["ffn.w3.weight"],  # Transpose from (d_model, d_ff) to (d_ff, d_model)
+    }
+    
+    # Load state dict with strict=False to allow missing RoPE buffers (they'll be initialized automatically)
+    transformer_block.load_state_dict(state_dict, strict=False)
+    
+    # Run forward pass
+    with torch.no_grad():
+        output = transformer_block(in_features)
+    
+    return output
 
 
 def run_transformer_lm(
@@ -300,7 +462,7 @@ def run_transformer_lm(
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
-        rope_theta (float): The RoPE $\Theta$ parameter.
+        rope_theta (float): The RoPE $Theta$ parameter.
         weights (dict[str, Tensor]):
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).
@@ -355,7 +517,56 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    # Import the TransformerLM class from cs336_basics
+    from cs336_basics import TransformerLM
+    
+    # Create the Transformer language model with RoPE
+    model = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        num_layers=num_layers,
+        theta=rope_theta,
+        max_seq_len=context_length
+    )
+    
+    # Build the state dict mapping from the provided weights to our model's structure
+    state_dict = {}
+    
+    # Token embeddings
+    state_dict["token_embedding.weight"] = weights["token_embeddings.weight"]
+    
+    # Layer weights
+    for layer_idx in range(num_layers):
+        # Attention weights
+        state_dict[f"blocks.{layer_idx}.attention.W_q.W"] = weights[f"layers.{layer_idx}.attn.q_proj.weight"]
+        state_dict[f"blocks.{layer_idx}.attention.W_k.W"] = weights[f"layers.{layer_idx}.attn.k_proj.weight"]
+        state_dict[f"blocks.{layer_idx}.attention.W_v.W"] = weights[f"layers.{layer_idx}.attn.v_proj.weight"]
+        state_dict[f"blocks.{layer_idx}.attention.W_o.W"] = weights[f"layers.{layer_idx}.attn.output_proj.weight"]
+        
+        # Layer norm weights
+        state_dict[f"blocks.{layer_idx}.norm1.weight"] = weights[f"layers.{layer_idx}.ln1.weight"]
+        state_dict[f"blocks.{layer_idx}.norm2.weight"] = weights[f"layers.{layer_idx}.ln2.weight"]
+        
+        # Feed-forward weights
+        state_dict[f"blocks.{layer_idx}.feed_forward.W1.W"] = weights[f"layers.{layer_idx}.ffn.w1.weight"]
+        state_dict[f"blocks.{layer_idx}.feed_forward.W2.W"] = weights[f"layers.{layer_idx}.ffn.w2.weight"]
+        state_dict[f"blocks.{layer_idx}.feed_forward.W3.W"] = weights[f"layers.{layer_idx}.ffn.w3.weight"]
+    
+    # Final layer norm and output projection
+    state_dict["final_norm.weight"] = weights["ln_final.weight"]
+    state_dict["lm_head.W"] = weights["lm_head.weight"]
+    
+    # Load the state dict (with strict=False to handle RoPE buffers)
+    model.load_state_dict(state_dict, strict=False)
+    
+    # Run forward pass
+    with torch.no_grad():
+        output = model(in_indices)
+    
+    return output
 
 
 def run_rmsnorm(
@@ -378,7 +589,21 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    # Import the RMSNorm class from cs336_basics
+    from cs336_basics import RMSNorm
+    
+    # Create an RMSNorm module with the given parameters
+    rmsnorm_module = RMSNorm(d_model=d_model, eps=eps)
+    
+    # Load the provided weights into the module
+    state_dict = {"weight": weights}
+    rmsnorm_module.load_state_dict(state_dict)
+    
+    # Apply RMSNorm to the input features
+    with torch.no_grad():
+        output = rmsnorm_module(in_features)
+    
+    return output
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -415,7 +640,11 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    # Import the get_batch function from cs336_basics
+    from cs336_basics.dataloader_utlis import get_batch
+    
+    # Call our implementation and return the result
+    return get_batch(dataset, batch_size, context_length, device)
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -431,7 +660,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    return torch.softmax(in_features, dim=dim)
+
 
 
 def run_cross_entropy(
@@ -449,7 +679,11 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    # Import the cross_entropy function from cs336_basics
+    from cs336_basics import cross_entropy
+    
+    # Compute and return the cross entropy loss
+    return cross_entropy(inputs, targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -461,14 +695,21 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    # Import the gradient_clipping function from cs336_basics
+    from cs336_basics import gradient_clipping
+    
+    # Apply gradient clipping
+    gradient_clipping(parameters, max_l2_norm)
 
 
 def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    # Import the AdamW class from cs336_basics
+    from cs336_basics.train_utilis import AdamW
+    
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
@@ -496,7 +737,17 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    # Import the cosine learning rate schedule function from cs336_basics
+    from cs336_basics import cosine_lr_schedule
+    
+    # Call our implementation with the appropriate parameters
+    return cosine_lr_schedule(
+        t=it,
+        alpha_max=max_learning_rate,
+        alpha_min=min_learning_rate,
+        T_w=warmup_iters,
+        T_c=cosine_cycle_iters
+    )
 
 
 def run_save_checkpoint(
@@ -515,14 +766,18 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
+    # Import the save_checkpoint function from cs336_basics
+    from cs336_basics import save_checkpoint
+    
+    # Call our implementation
+    save_checkpoint(model, optimizer, iteration, out)
 
 
 def run_load_checkpoint(
     src: str | os.PathLike | BinaryIO | IO[bytes],
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-) -> int:
+):
     """
     Given a serialized checkpoint (path or file-like object), restore the
     serialized state to the given model and optimizer.
@@ -536,7 +791,11 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+    # Import the load_checkpoint function from cs336_basics
+    from cs336_basics import load_checkpoint
+    
+    # Call our implementation and return the iteration number
+    return load_checkpoint(src, model, optimizer)
 
 
 def get_tokenizer(
