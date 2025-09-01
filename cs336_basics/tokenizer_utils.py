@@ -68,6 +68,21 @@ def _pretokenize_chunk(args):
         chunk_bytes = f.read(end - start)
         text_chunk = chunk_bytes.decode("utf-8", errors="ignore")
     
+    # Create GPT-2 byte ordering mapping
+    def gpt2_bytes_to_unicode() -> dict[int, str]:
+        bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+        cs = bs[:]
+        n = 0
+        for b in range(2**8):
+            if b not in bs:
+                bs.append(b)
+                cs.append(2**8 + n)
+                n += 1
+        return dict(zip(bs, [chr(n) for n in cs]))
+    
+    gpt2_byte_order = list(gpt2_bytes_to_unicode().keys())
+    byte_to_token_id = {byte_val: len(special_tokens) + i for i, byte_val in enumerate(gpt2_byte_order)}
+
     # Split on special tokens to prevent merging across boundaries
     if special_tokens:
         # Escape special characters in special tokens and join with |
@@ -82,14 +97,14 @@ def _pretokenize_chunk(args):
     words = []
     for segment in segments:
         if segment.strip():  # Skip empty segments
-            # Find all pre-tokens in this segment
-            pre_tokens = re.findall(pattern, segment)
-            
-            # Convert each pre-token to a list of byte values
-            for pre_token in pre_tokens:
+            # Use re.finditer as specified in the instructions
+            for match in re.finditer(pattern, segment):
+                pre_token = match.group()
                 if pre_token.strip():  # Skip empty tokens
                     token_bytes = pre_token.encode('utf-8')
-                    words.append(list(token_bytes))
+                    # Convert each byte to its corresponding token ID using GPT-2 ordering
+                    word_token_ids = [byte_to_token_id[byte_val] for byte_val in token_bytes]
+                    words.append(word_token_ids)
     
     return words
 
@@ -122,14 +137,36 @@ def train_bpe(
     with open(input_path, 'r', encoding='utf-8') as f:
         text = f.read()
     
-    # Initialize vocabulary with all possible bytes (0-255)
-    vocab = {i: bytes([i]) for i in range(256)}
+    # Initialize vocabulary with special tokens first (starting at ID 0)
+    vocab = {}
     
-    # Add special tokens to vocabulary
-    for special_token in special_tokens:
+    # Add special tokens to vocabulary at the beginning
+    for i, special_token in enumerate(special_tokens):
         special_token_bytes = special_token.encode('utf-8')
-        vocab[len(vocab)] = special_token_bytes
+        vocab[i] = special_token_bytes
     
+    # Add all possible bytes using GPT-2 ordering
+    # Get the GPT-2 byte ordering (printable chars first, then shifted non-printable)
+    def gpt2_bytes_to_unicode() -> dict[int, str]:
+        # These 188 integers can used as-is, since they are not whitespace or control characters.
+        bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+        cs = bs[:]
+        # now get the representations of the other 68 integers that do need shifting
+        n = 0
+        for b in range(2**8):
+            if b not in bs:
+                bs.append(b)
+                cs.append(2**8 + n)
+                n += 1
+        return dict(zip(bs, [chr(n) for n in cs]))
+    
+    gpt2_byte_order = list(gpt2_bytes_to_unicode().keys())
+    for i, byte_val in enumerate(gpt2_byte_order):
+        vocab[len(special_tokens) + i] = bytes([byte_val])
+    
+    # Create a mapping from byte values to token IDs for efficient lookup
+    byte_to_token_id = {byte_val: len(special_tokens) + i for i, byte_val in enumerate(gpt2_byte_order)}
+
     # Pre-tokenize using regex pattern similar to GPT-2
     # This pattern handles contractions, words, numbers, punctuation, and whitespace
     # Since Python's re doesn't support \p{L} and \p{N}, we use character classes
@@ -141,7 +178,7 @@ def train_bpe(
     # Check file size to decide whether to parallelize
     file_size = os.path.getsize(input_path)
     
-    if file_size > 100000 and num_processes > 1:  # Only parallelize for large files
+    if False:  # Temporarily disable parallelization for debugging
         # Use <|endoftext|> as the split token for chunk boundaries
         split_special_token = b"<|endoftext|>"
         
@@ -177,14 +214,14 @@ def train_bpe(
         words = []
         for segment in segments:
             if segment.strip():  # Skip empty segments
-                # Find all pre-tokens in this segment
-                pre_tokens = re.findall(pattern, segment)
-                
-                # Convert each pre-token to a list of byte values
-                for pre_token in pre_tokens:
+                # Use re.finditer as specified in the instructions
+                for match in re.finditer(pattern, segment):
+                    pre_token = match.group()
                     if pre_token.strip():  # Skip empty tokens
                         token_bytes = pre_token.encode('utf-8')
-                        words.append(list(token_bytes))
+                        # Convert each byte to its corresponding token ID using GPT-2 ordering
+                        word_token_ids = [byte_to_token_id[byte_val] for byte_val in token_bytes]
+                        words.append(word_token_ids)
     
     # List to store merges in order
     merges = []
@@ -203,7 +240,8 @@ def train_bpe(
     for merge_idx in range(num_merges):
         # Count all adjacent token pairs across all unique words
         pairs = defaultdict(int)
-        for word_tuple, count in word_counts.items():
+        # Sort word_counts.items() to ensure deterministic iteration
+        for word_tuple, count in sorted(word_counts.items()):
             word = list(word_tuple)
             for i in range(len(word) - 1):
                 pair = (word[i], word[i + 1])
@@ -213,17 +251,28 @@ def train_bpe(
             break
             
         # Find the most frequent pair, with lexicographic tie-breaking
-        max_count = max(pairs.values())
-        # Get all pairs with the maximum count
-        candidates = [pair for pair, count in pairs.items() if count == max_count]
-        # Choose the lexicographically greatest pair
-        best_pair = max(candidates)
+        # Single pass: find max count and collect pairs with that count
+        max_count = 0
+        max_pairs = []
+        
+        # Sort pairs.items() to ensure deterministic iteration order
+        for pair, count in sorted(pairs.items()):
+            if count > max_count:
+                max_count = count
+                max_pairs = [pair]  # Start new list with this pair
+            elif count == max_count:
+                max_pairs.append(pair)  # Add to existing max pairs
+        
+        # Use lexicographic tie-breaking: choose the lexicographically greatest pair
+        best_pair = max(max_pairs, key=lambda pair: (vocab[pair[0]], vocab[pair[1]]))
         
         # Create new token ID for the merged pair
-        new_token_id = 256 + len(special_tokens) + merge_idx
+        # IDs 0 to len(special_tokens)-1 are for special tokens
+        # IDs len(special_tokens) to len(special_tokens)+255 are for bytes
+        # New merged tokens start after that
+        new_token_id = len(special_tokens) + 256 + merge_idx
         
         # Add the merged token to vocabulary
-        # Get the bytes representation of each token in the pair
         token1_bytes = vocab[best_pair[0]]
         token2_bytes = vocab[best_pair[1]]
         merged_token_bytes = token1_bytes + token2_bytes
@@ -234,7 +283,8 @@ def train_bpe(
         
         # Apply the merge to all unique words and update counts
         new_word_counts = Counter()
-        for word_tuple, count in word_counts.items():
+        # Sort word_counts.items() to ensure deterministic iteration
+        for word_tuple, count in sorted(word_counts.items()):
             word = list(word_tuple)
             new_word = []
             i = 0

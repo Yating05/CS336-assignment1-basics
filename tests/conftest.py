@@ -138,11 +138,29 @@ class Snapshot:
         # Load the snapshot
         with open(snapshot_path, "rb") as f:
             expected_data = pickle.load(f)
+        
+        # print("snapshot path:", snapshot_path)
+        
+        # print("expected data:", expected_data)
 
         if isinstance(actual, dict):
             for key in actual:
                 if key not in expected_data:
                     raise AssertionError(f"Key '{key}' not found in snapshot for {test_name}")
+
+                # print("vocab key:", key)
+                print("vocab value:", actual[key])
+
+                print("expected key:", key)
+                print("expected value:", expected_data[key])
+                # # print the difference if not equal
+                # if actual[key] != expected_data[key]:
+                    # print(f"Difference found for key '{key}' in snapshot for {test_name}:")
+
+                    # for i, (a, b) in enumerate(zip(actual[key], expected_data[key])):
+                    #     if a != b:
+                    #         print(f"  Difference at index {i}: {a} != {b}")
+
                 assert actual[key] == expected_data[key], (
                     f"Data for key '{key}' does not match snapshot for {test_name}"
                 )

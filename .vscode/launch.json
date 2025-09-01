@@ -12,7 +12,9 @@
             "python": "${command:python.interpreterPath}",  
             "console": "integratedTerminal",
             // "args": ["-k", "test_multihead_self_attention"],
+            
             "args": ["tests/test_train_bpe.py"],
+            
             "cwd": "${workspaceFolder}"
         }
     ]

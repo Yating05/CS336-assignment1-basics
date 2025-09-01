@@ -5,7 +5,7 @@ Neural network utility modules for CS336 Assignment 1.
 import torch
 import torch.nn as nn
 import torch.nn.init as init
-from jaxtyping import Float
+# from jaxtyping import Float
 from torch import Tensor
 from typing import Optional
 
